@@ -29,6 +29,10 @@ const PATHS = {
   upload: "M12 16V4M7 9l5-5 5 5M4 16v4h16v-4",
   download: "M12 4v12M7 11l5 5 5-5M4 20h16",
   reset: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5",
+  plus: "M12 5v14M5 12h14",
+  minus: "M5 12h14",
+  swap: "M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7",
+  file: "M14 3H6v18h12V7zM14 3v4h4",
 };
 
 export function icon(name) {

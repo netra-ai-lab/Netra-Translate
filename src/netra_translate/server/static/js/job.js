@@ -1,14 +1,12 @@
 import { api } from "./api.js";
 import { num, t } from "./i18n.js";
+import { buildHits, buildTranslated, fitSheet, layoutPage, loadPixels, pagePng } from "./render.js";
 import { copyText, download, h, icon, iconButton, toast } from "./util.js";
 
 const TEXT_TYPES = new Set(["heading", "paragraph", "caption", "page_header", "page_footer"]);
 const DIRECTIONS = ["auto", "km2en", "en2km"];
-const MENU_FORMATS = ["docx", "md", "html", "txt", "json"];
-
-function typeKey(b) {
-  return b.type === "heading" ? `heading-${b.level || 1}` : b.type;
-}
+const MENU_FORMATS = ["docx", "html", "md", "txt", "json"];
+const ZOOMS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2];
 
 export function renderJob(root, jobId) {
   let disposed = false;
@@ -60,28 +58,31 @@ export function renderJob(root, jobId) {
   }
 
   function renderMissing() {
-    root.replaceChildren(h("section", { class: "wrap" }, h("div", { class: "processing" },
+    root.replaceChildren(h("section", { class: "wrap" }, h("div", { class: "processing panel" },
       h("p", { class: "eyebrow muted2" }, t("status.error")),
-      h("h1", { class: "h2" }, t("proc.missing")),
-      h("p", { class: "note" }, h("a", { href: "#/" }, `← ${t("proc.back")}`)))));
+      h("h1", { class: "h3" }, t("proc.missing")),
+      h("p", { class: "actions" }, h("a", { class: "pill", href: "#/" }, t("proc.back"))))));
   }
 
   function renderProgress(job) {
     if (!progressEls) {
+      const step = (key) => h("li", { class: "step" }, h("span", { class: "step-dot", "aria-hidden": "true" }),
+        h("span", { class: "step-name" }, t(key)), h("span", { class: "step-meta meta" }));
       progressEls = {
-        eyebrow: h("p", { class: "eyebrow muted2" }),
+        steps: [step("proc.step.ocr"), step("proc.step.translate")],
         bar: h("div", { class: "bar" }, h("span")),
         meta: h("p", { class: "meta", role: "status" }),
         note: h("p", { class: "note" }),
         actions: h("div", { class: "actions" }),
       };
-      const { eyebrow, bar, meta, note, actions } = progressEls;
-      root.replaceChildren(h("section", { class: "wrap" }, h("div", { class: "processing" },
-        eyebrow, h("h1", { class: "h2" }, job.filename), bar, meta, note, actions)));
+      const { steps, bar, meta, note, actions } = progressEls;
+      root.replaceChildren(h("section", { class: "wrap" }, h("div", { class: "processing panel" },
+        h("h1", { class: "h3 proc-name" }, job.filename),
+        h("ol", { class: "steps" }, steps), bar, meta, note, actions)));
     }
-    const { eyebrow, bar, meta, note, actions } = progressEls;
+    const { steps, bar, meta, note, actions } = progressEls;
     if (job.status === "error") {
-      eyebrow.textContent = t("status.error");
+      steps.forEach((s) => s.classList.remove("active"));
       bar.hidden = true;
       meta.textContent = t("proc.failed");
       note.replaceChildren(h("span", { class: "error-text" }, job.error || ""));
@@ -94,13 +95,20 @@ export function renderJob(root, jobId) {
       return;
     }
     const { phase, done, total } = job.progress;
-    eyebrow.textContent = t(`proc.eyebrow.${phase === "translate" ? "translate" : "ocr"}`);
+    const translating = phase === "translate";
+    steps[0].classList.toggle("active", !translating);
+    steps[0].classList.toggle("done", translating);
+    steps[1].classList.toggle("active", translating);
+    const counter = total && done ? `${num(done)} / ${num(total)}` : "";
+    steps[0].lastChild.textContent = translating ? "" : counter;
+    steps[1].lastChild.textContent = translating ? counter : "";
+
     bar.hidden = false;
     bar.classList.toggle("indeterminate", job.status === "queued" || !total || done === 0);
     bar.firstChild.style.width = total ? `${Math.max(4, (done / total) * 100)}%` : "0";
     if (job.status === "queued") meta.textContent = t("proc.queued");
     else if (!total || done === 0) meta.textContent = t("proc.starting");
-    else meta.textContent = t(phase === "translate" ? "proc.blocks" : "proc.page", { done: num(done), total: num(total) });
+    else meta.textContent = t(translating ? "proc.blocks" : "proc.page", { done: num(done), total: num(total) });
     note.textContent = t("proc.note");
     actions.replaceChildren();
   }
@@ -114,180 +122,178 @@ export function renderJob(root, jobId) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Document view: original page on the left, translation on the right
+// Document view: the scan and its translated copy, page by page
 // ════════════════════════════════════════════════════════════════════════
+
+function segmented(label, options, value, onpick) {
+  const buttons = options.map(([v, text, extra = {}]) => h("button", {
+    type: "button", "aria-pressed": String(v === value), dataset: { value: v },
+    onclick: () => onpick(v), ...extra }, text));
+  const el = h("div", { class: "seg", role: "group", "aria-label": label }, buttons);
+  el.set = (v) => buttons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.value === v)));
+  return el;
+}
 
 function renderDocument(root, job, doc, retranslate) {
   const pages = doc.pages;
   const blocks = doc.blocks;
-  const state = { page: blocks[0] ? blocks[0].page : 0, activeId: null, bilingual: false };
+  const assetUrl = (id) => api.assetUrl(job.id, id);
+  const narrow = window.matchMedia("(max-width: 899px)");
+  const state = { view: narrow.matches ? "translated" : "both", zoom: 3, current: 0, bilingual: false };
+  const current = job.direction || job.options.direction;
 
   // ── toolbar ─────────────────────────────────────────────────────────
-  const direction = h("select", { class: "select", "aria-label": t("doc.direction"),
-    onchange: async () => {
-      direction.disabled = true;
-      if (!(await retranslate(direction.value))) {
-        direction.value = job.direction || job.options.direction;
-        direction.disabled = false;
+  const dirSeg = segmented(t("doc.direction"),
+    DIRECTIONS.map((d) => [d, t(`dir.short.${d}`), { title: t(`dir.${d}`) }]), current,
+    async (d) => {
+      if (d === current) return;
+      dirSeg.set(d);
+      dirSeg.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      if (!(await retranslate(d))) {
+        dirSeg.set(current);
+        dirSeg.querySelectorAll("button").forEach((b) => { b.disabled = false; });
       }
-    } }, DIRECTIONS.map((d) => h("option", { value: d, selected: d === (job.direction || job.options.direction) }, t(`dir.${d}`))));
+    });
+
+  const viewSeg = segmented(t("doc.view"), [
+    ["original", t("doc.original")],
+    ["both", t("doc.sideBySide"), { class: "wide-only" }],
+    ["translated", t("doc.translation")],
+  ], state.view, setView);
+
+  const zoomLabel = h("button", { class: "zoom-label meta", type: "button", title: t("doc.zoomFit"),
+    onclick: () => setZoom(3) });
+  const zoom = h("div", { class: "zoom" },
+    iconButton("minus", t("doc.zoomOut"), () => setZoom(state.zoom - 1)),
+    zoomLabel,
+    iconButton("plus", t("doc.zoomIn"), () => setZoom(state.zoom + 1)));
 
   const bilingual = h("input", { type: "checkbox", onchange: () => { state.bilingual = bilingual.checked; } });
+  const menuItem = (label, ext, onclick) => h("button", { type: "button", role: "menuitem",
+    onclick: () => { closeMenu(); onclick(); } }, h("span", {}, label), h("span", { class: "meta" }, ext));
   const menuList = h("div", { class: "menu-list", role: "menu", hidden: true,
     onclick: (e) => e.stopPropagation() },
-    h("label", { class: "check" }, bilingual, h("span", {}, t("doc.bilingual"))),
-    MENU_FORMATS.map((f) => h("button", { type: "button", role: "menuitem",
-      onclick: () => { closeMenu(); download(api.exportUrl(job.id, f, state.bilingual)); } },
-    h("span", {}, t(`fmt.${f}`)), h("span", { class: "meta" }, `.${f}`))));
-  const moreBtn = h("button", { class: "pill pill-sm", type: "button", "aria-haspopup": "menu", "aria-expanded": "false",
-    onclick: (e) => { e.stopPropagation(); menuList.hidden ? openMenu() : closeMenu(); } }, t("doc.more"), icon("chevDown"));
-  function openMenu() { menuList.hidden = false; moreBtn.setAttribute("aria-expanded", "true"); }
-  function closeMenu() { menuList.hidden = true; moreBtn.setAttribute("aria-expanded", "false"); }
-  const onDocClick = () => closeMenu();
-  const onKey = (e) => { if (e.key === "Escape") closeMenu(); };
-  document.addEventListener("click", onDocClick);
-  document.addEventListener("keydown", onKey);
+    h("p", { class: "menu-head eyebrow muted2" }, t("doc.asPages")),
+    menuItem(t("fmt.pdf"), ".pdf", printPdf),
+    menuItem(t("fmt.png"), ".png", savePng),
+    h("p", { class: "menu-head eyebrow muted2" }, t("doc.asText")),
+    MENU_FORMATS.map((f) => menuItem(t(`fmt.${f}`), `.${f}`,
+      () => download(api.exportUrl(job.id, f, state.bilingual)))),
+    h("label", { class: "check menu-check" }, bilingual, h("span", {}, t("doc.bilingual"))));
+  const downloadBtn = h("button", { class: "pill pill-primary pill-sm", type: "button", "aria-haspopup": "menu",
+    "aria-expanded": "false", onclick: (e) => { e.stopPropagation(); menuList.hidden ? openMenu() : closeMenu(); } },
+  icon("download"), t("doc.download"), icon("chevDown"));
+  function openMenu() { menuList.hidden = false; downloadBtn.setAttribute("aria-expanded", "true"); }
+  function closeMenu() { menuList.hidden = true; downloadBtn.setAttribute("aria-expanded", "false"); }
 
   const toolbar = h("div", { class: "toolbar" }, h("div", { class: "toolbar-inner" },
     h("a", { class: "icon-btn", href: "#/", title: t("proc.back"), "aria-label": t("proc.back") }, icon("chevLeft")),
     h("div", { class: "doc-title" },
       h("strong", { title: job.filename }, job.filename),
-      h("span", { class: "meta" }, `${t("col.pages")}: ${num(pages.length)}`)),
-    direction,
-    h("span", { class: "divider", "aria-hidden": "true" }),
-    h("div", { class: "tool-group" },
-      h("button", { class: "pill pill-sm", type: "button", onclick: copyAll }, icon("copy"), t("doc.copy")),
-      h("div", { class: "menu" }, moreBtn, menuList),
-      h("button", { class: "pill pill-primary pill-sm", type: "button",
-        onclick: () => download(api.exportUrl(job.id, "docx", false)) }, icon("download"), t("doc.download")))));
+      h("span", { class: "meta" }, t(pages.length === 1 ? "doc.onePage" : "doc.pages", { n: num(pages.length) }))),
+    dirSeg,
+    h("span", { class: "spacer" }),
+    viewSeg,
+    zoom,
+    iconButton("copy", t("doc.copy"), copyAll),
+    h("div", { class: "menu" }, downloadBtn, menuList)));
 
-  // ── page viewer ─────────────────────────────────────────────────────
-  const pageImg = h("img", { alt: t("doc.original"), draggable: "false" });
-  const overlay = h("div", { class: "overlay" });
-  const frame = h("div", { class: "page-frame" }, h("div", { class: "page-stage" }, pageImg, overlay));
-  const pageLabel = h("span", { class: "meta" });
-  const prevBtn = iconButton("chevLeft", t("doc.prev"), () => showPage(state.page - 1));
-  const nextBtn = iconButton("chevRight", t("doc.next"), () => showPage(state.page + 1));
-  const thumbs = h("div", { class: "thumbs", hidden: pages.length < 2 },
-    pages.map((p) => h("button", { class: "thumb", type: "button",
-      "aria-label": t("doc.pageLabel", { n: num(p.index + 1) }), onclick: () => showPage(p.index) },
-    h("img", { src: p.image ? api.assetUrl(job.id, p.image) : "", alt: "", loading: "lazy" }))));
-  const viewer = h("aside", { class: "viewer", "aria-label": t("doc.original") },
-    h("div", { class: "viewer-head" },
-      h("span", { class: "eyebrow muted2" }, t("doc.original")),
-      h("div", { class: "tool-group", hidden: pages.length < 2 }, prevBtn, pageLabel, nextBtn)),
-    frame, thumbs);
+  // ── pages ───────────────────────────────────────────────────────────
+  const byPage = new Map(pages.map((p) => [p.index, []]));
+  for (const b of blocks) byPage.get(b.page)?.push(b);
+  const layouts = new Map();
 
-  function showPage(index) {
-    if (index < 0 || index >= pages.length) return;
-    const changed = index !== state.page || !pageImg.getAttribute("src");
-    state.page = index;
-    const p = pages[index];
-    if (changed) pageImg.src = p.image ? api.assetUrl(job.id, p.image) : "";
-    pageLabel.textContent = t("doc.page", { n: num(index + 1), total: num(pages.length) });
-    prevBtn.disabled = index === 0;
-    nextBtn.disabled = index === pages.length - 1;
-    thumbs.querySelectorAll(".thumb").forEach((el, i) => el.setAttribute("aria-current", String(i === index)));
-    renderOverlay();
+  const rows = pages.map((p) => {
+    const ratio = p.width && p.height ? `${p.width} / ${p.height}` : "1 / 1.414";
+    const hits = h("div", { class: "hits" });
+    const original = h("div", { class: "sheet sheet-src", style: `aspect-ratio:${ratio}` },
+      p.image ? h("img", { src: assetUrl(p.image), alt: t("doc.pageLabel", { n: num(p.index + 1) }),
+        loading: "lazy", draggable: "false" }) : null,
+      hits);
+    const translated = h("div", { class: "sheet sheet-tr", style: `aspect-ratio:${ratio}` });
+    const row = h("section", { class: "page-row", dataset: { page: p.index },
+      "aria-label": t("doc.pageLabel", { n: num(p.index + 1) }) },
+    h("div", { class: "pane pane-src" }, original),
+    h("div", { class: "pane pane-tr" }, translated),
+    pages.length > 1 ? h("p", { class: "page-num meta" }, t("doc.page", { n: num(p.index + 1), total: num(pages.length) })) : null);
+    row._parts = { page: p, hits, translated, built: false };
+    return row;
+  });
+
+  // Pages are laid out when they come near the screen.
+  async function build(row) {
+    const parts = row._parts;
+    if (parts.built) return;
+    parts.built = true;
+    const p = parts.page;
+    if (!p.width || !p.height) return;
+    const px = p.image ? await loadPixels(assetUrl(p.image)) : null;
+    const layout = layoutPage(p, byPage.get(p.index) || [], px);
+    layouts.set(p.index, layout);
+    buildTranslated(parts.translated, p, layout, assetUrl);
+    buildHits(parts.hits, p, layout);
+    requestAnimationFrame(() => fitSheet(parts.translated));
   }
 
-  function renderOverlay() {
-    const p = pages[state.page];
-    if (!p || !p.width) return overlay.replaceChildren();
-    overlay.replaceChildren(...blocks
-      .filter((b) => b.page === state.page && b.bbox)
-      .map((b) => {
-        const [x1, y1, x2, y2] = b.bbox;
-        return h("button", {
-          class: `ov${b.id === state.activeId ? " active" : ""}`, type: "button", dataset: { id: b.id, type: b.type },
-          style: `left:${(x1 / p.width) * 100}%;top:${(y1 / p.height) * 100}%;`
-            + `width:${((x2 - x1) / p.width) * 100}%;height:${((y2 - y1) / p.height) * 100}%`,
-          "aria-label": t(`type.${typeKey(b)}`),
-          onclick: () => focusBlock(b.id),
-          onmouseenter: () => hover(b.id, true),
-          onmouseleave: () => hover(b.id, false),
-        }, h("span", { class: "ov-tag" }, t(`type.${typeKey(b)}`)));
-      }));
+  const near = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting) build(e.target);
+  }, { rootMargin: "800px 0px" });
+  // The page in the middle of the screen is the one PNG export saves.
+  const seen = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting) state.current = Number(e.target.dataset.page);
+  }, { rootMargin: "-45% 0px -45% 0px" });
+  rows.forEach((r) => { near.observe(r); seen.observe(r); });
+
+  const pagesEl = h("div", { class: "pages", "aria-live": "off" },
+    rows.length ? rows : h("p", { class: "empty" }, t("doc.empty")));
+  const stage = h("div", { class: "doc-stage" }, pagesEl);
+
+  // ── line linking ────────────────────────────────────────────────────
+  // Hovering a line lights up the same line on both sheets; clicking keeps it lit.
+  let hovered = null;
+  let selected = null;
+  const mark = (row, key, cls, on) => {
+    if (!row || !key) return;
+    row.querySelectorAll(`[data-line="${CSS.escape(key)}"]`).forEach((el) => el.classList.toggle(cls, on));
+  };
+  function lineAt(target) {
+    const el = target.closest?.("[data-line]");
+    return el ? { row: el.closest(".page-row"), key: el.dataset.line } : null;
+  }
+  pagesEl.addEventListener("mouseover", (e) => {
+    const hit = lineAt(e.target);
+    if (hovered && (!hit || hit.key !== hovered.key)) { mark(hovered.row, hovered.key, "hl", false); hovered = null; }
+    if (hit && !hovered) { hovered = hit; mark(hit.row, hit.key, "hl", true); }
+  });
+  pagesEl.addEventListener("mouseleave", () => {
+    if (hovered) { mark(hovered.row, hovered.key, "hl", false); hovered = null; }
+  });
+  pagesEl.addEventListener("click", (e) => {
+    if (window.getSelection()?.toString()) return;
+    const hit = lineAt(e.target);
+    if (selected) mark(selected.row, selected.key, "sel", false);
+    selected = hit && (!selected || hit.key !== selected.key) ? hit : null;
+    if (selected) mark(selected.row, selected.key, "sel", true);
+  });
+
+  // ── view + zoom ─────────────────────────────────────────────────────
+  function setView(v) {
+    state.view = v;
+    viewSeg.set(v);
+    stage.dataset.view = v;
+    requestAnimationFrame(() => rows.forEach((r) => r._parts.built && fitSheet(r._parts.translated)));
   }
 
-  // ── translation ─────────────────────────────────────────────────────
-  const showSource = h("input", { type: "checkbox", checked: true,
-    onchange: () => docEl.classList.toggle("hide-source", !showSource.checked) });
-  const docEl = h("article", { class: "doc" });
-  const docCol = h("section", { "aria-label": t("doc.translation") },
-    h("div", { class: "doc-head" },
-      h("span", { class: "eyebrow muted2" }, t("doc.translation")),
-      h("label", { class: "check meta" }, showSource, h("span", {}, t("doc.showSource")))),
-    docEl);
-
-  function renderDoc() {
-    const children = [];
-    let prevPage = null;
-    for (const b of blocks) {
-      if (pages.length > 1 && b.page !== prevPage) {
-        children.push(h("div", { class: "page-break eyebrow" }, t("doc.pageLabel", { n: num(b.page + 1) })));
-      }
-      prevPage = b.page;
-      children.push(renderBlock(b));
-    }
-    if (!blocks.length) children.push(h("p", { class: "empty" }, t("doc.empty")));
-    docEl.replaceChildren(...children);
+  function setZoom(i) {
+    state.zoom = Math.max(0, Math.min(ZOOMS.length - 1, i));
+    stage.style.setProperty("--zoom", ZOOMS[state.zoom]);
+    zoomLabel.textContent = `${Math.round(ZOOMS[state.zoom] * 100)}%`;
+    zoom.firstChild.disabled = state.zoom === 0;
+    zoom.lastChild.disabled = state.zoom === ZOOMS.length - 1;
   }
 
-  function table(rows) {
-    return h("div", { class: "tbl-wrap" }, h("table", {}, h("tbody", {},
-      rows.map((row) => h("tr", {}, row.map((cell) => h("td", {}, cell)))))));
-  }
-
-  function renderBlock(b) {
-    const key = typeKey(b);
-    const body = h("div", { class: "block-body" });
-    if (TEXT_TYPES.has(b.type)) {
-      body.append(b.text ? h("div", { class: "text" }, b.text) : h("div", { class: "text untranslated" }, t("doc.notTranslated")));
-      if (b.source_text && b.source_text !== b.text) body.append(h("div", { class: "source" }, b.source_text));
-    } else if (b.type === "table") {
-      body.append(table(b.rows || []));
-      if (b.source_rows) body.append(h("div", { class: "source" }, table(b.source_rows)));
-    } else if (b.image) {
-      body.append(h("figure", {}, h("img", { src: api.assetUrl(job.id, b.image), alt: t(`type.${key}`), loading: "lazy" })));
-    }
-    return h("div", {
-      class: `block b-${key} align-${b.align || "left"}`, dataset: { id: b.id },
-      onclick: () => setActive(b.id),
-      onmouseenter: () => hover(b.id, true),
-      onmouseleave: () => hover(b.id, false),
-    }, h("div", { class: "block-label" }, t(`type.${key}`)), body);
-  }
-
-  // ── linking boxes and blocks ────────────────────────────────────────
-  const sel = (id) => `[data-id="${CSS.escape(id)}"]`;
-
-  function hover(id, on) {
-    docEl.querySelector(`.block${sel(id)}`)?.classList.toggle("hover", on);
-    overlay.querySelector(`.ov${sel(id)}`)?.classList.toggle("hover", on);
-  }
-
-  function setActive(id) {
-    state.activeId = id;
-    docEl.querySelectorAll(".block.active").forEach((el) => el.classList.remove("active"));
-    docEl.querySelector(`.block${sel(id)}`)?.classList.add("active");
-    const b = blocks.find((x) => x.id === id);
-    if (b && b.page !== state.page) showPage(b.page);
-    else renderOverlay();
-    const ov = overlay.querySelector(`.ov${sel(id)}`);
-    if (ov) scrollIntoFrame(ov);
-  }
-
-  function scrollIntoFrame(ov) {
-    const f = frame.getBoundingClientRect();
-    const r = ov.getBoundingClientRect();
-    if (r.top < f.top || r.bottom > f.bottom) frame.scrollTop += r.top - f.top - f.height / 3;
-  }
-
-  function focusBlock(id) {
-    setActive(id);
-    docEl.querySelector(`.block${sel(id)}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }
+  const onNarrow = () => { if (narrow.matches && state.view === "both") setView("translated"); };
+  narrow.addEventListener("change", onNarrow);
 
   // ── output ──────────────────────────────────────────────────────────
   function plainText() {
@@ -302,12 +308,50 @@ function renderDocument(root, job, doc, retranslate) {
     if (await copyText(plainText())) toast(t("doc.copied"));
   }
 
+  async function savePng() {
+    const row = rows[state.current];
+    if (!row) return;
+    await build(row);
+    const layout = layouts.get(state.current);
+    if (!layout) return;
+    const blob = await pagePng(row._parts.page, layout, assetUrl);
+    if (!blob) return toast(t("err.generic"));
+    const url = URL.createObjectURL(blob);
+    const a = h("a", { href: url,
+      download: `${job.filename.replace(/\.[^.]+$/, "")}_translated${pages.length > 1 ? `_p${state.current + 1}` : ""}.png` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // Printing (Save as PDF) prints the translated sheets only, so every one has
+  // to be laid out and visible first.
+  async function printPdf() {
+    if (state.view === "original") setView("translated");
+    await Promise.all(rows.map(build));
+    await new Promise((r) => requestAnimationFrame(r));
+    rows.forEach((r) => fitSheet(r._parts.translated));
+    window.print();
+  }
+  const beforePrint = () => rows.forEach((r) => build(r));
+  window.addEventListener("beforeprint", beforePrint);
+
+  const onDocClick = () => closeMenu();
+  const onKey = (e) => { if (e.key === "Escape") closeMenu(); };
+  document.addEventListener("click", onDocClick);
+  document.addEventListener("keydown", onKey);
+
   // ── mount ───────────────────────────────────────────────────────────
-  root.replaceChildren(toolbar, h("div", { class: "wrap" }, h("div", { class: "split" }, viewer, docCol)));
-  renderDoc();
-  showPage(state.page);
+  root.replaceChildren(toolbar, stage);
+  setView(state.view);
+  setZoom(state.zoom);
 
   return () => {
+    near.disconnect();
+    seen.disconnect();
+    narrow.removeEventListener("change", onNarrow);
+    window.removeEventListener("beforeprint", beforePrint);
     document.removeEventListener("click", onDocClick);
     document.removeEventListener("keydown", onKey);
   };

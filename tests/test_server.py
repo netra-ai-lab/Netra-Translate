@@ -84,7 +84,8 @@ def test_static_assets(client):
     r = client.get("/")
     assert r.status_code == 200 and "Netra Translate" in r.text
     for path in ("/static/app.css", "/static/tokens.css", "/static/brand/symbol.svg",
-                 "/static/brand/wordmark-latin.svg", "/static/favicon.svg", "/static/js/main.js", "/static/js/job.js"):
+                 "/static/brand/wordmark-latin.svg", "/static/favicon.svg", "/static/js/main.js", "/static/js/job.js",
+                 "/static/js/render.js"):
         assert client.get(path).status_code == 200, path
     r = client.get("/static/fonts/KantumruyPro-Regular.woff2")
     assert r.status_code == 200 and len(r.content) > 10_000

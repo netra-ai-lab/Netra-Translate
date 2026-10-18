@@ -3,51 +3,89 @@ import { num, t } from "./i18n.js";
 import { formatDate, h, icon, iconButton, toast } from "./util.js";
 
 const ACCEPT = ".pdf,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.webp,application/pdf,image/*";
-const DIRECTIONS = ["auto", "km2en", "en2km"];
 
 function statusLabel(job) {
   if (job.status === "running") return t(`status.${job.progress.phase || "ocr"}`);
   return t(`status.${job.status}`);
 }
 
+// The language row maps onto the API's three directions.
+function directionOf(from) {
+  return from === "km" ? "km2en" : from === "en" ? "en2km" : "auto";
+}
+
 export function renderHome(root, info) {
   let disposed = false;
   let pollTimer = null;
   let file = null;
+  let previewUrl = null;
   const limits = info?.limits || { max_upload_mb: 50, max_pages: 100, job_ttl_hours: 24 };
   const demo = !!info?.demo;
   const layoutAvailable = info ? info.layout_available : true;
 
   // ── upload card ─────────────────────────────────────────────────────
   const input = h("input", { type: "file", accept: ACCEPT, "aria-label": t("drop.label") });
-  const dropTitle = h("p", { class: "drop-title", html: t("drop.title") });
-  const dropMeta = h("p", { class: "meta" }, t("drop.meta", { mb: limits.max_upload_mb, pages: limits.max_pages }));
-  const drop = h("label", { class: "drop" },
-    h("span", { class: "drop-icon" }, icon("upload")), dropTitle, dropMeta, input);
+  const dropBody = h("div", { class: "drop-body" });
+  const drop = h("label", { class: "drop" }, dropBody, input);
 
-  const direction = h("select", { class: "select", "aria-label": t("opt.direction") },
-    DIRECTIONS.map((d) => h("option", { value: d }, t(`dir.${d}`))));
+  function showEmpty() {
+    dropBody.replaceChildren(
+      h("span", { class: "drop-icon" }, icon("upload")),
+      h("p", { class: "drop-title", html: t("drop.title") }),
+      h("p", { class: "meta" }, t("drop.meta", { mb: limits.max_upload_mb, pages: limits.max_pages })));
+  }
+
+  const from = h("select", { class: "select", "aria-label": t("lang.from"), onchange: syncTo },
+    ["auto", "km", "en"].map((v) => h("option", { value: v }, t(`lang.${v}`))));
+  const to = h("select", { class: "select", "aria-label": t("lang.to"), onchange: syncFrom });
+  const swap = iconButton("swap", t("lang.swap"), () => {
+    from.value = from.value === "km" ? "en" : "km";
+    syncTo();
+  });
+
+  // Two languages: picking one side fixes the other. "Detect" translates each
+  // block into the other language, whichever it is.
+  function syncTo() {
+    const v = from.value;
+    to.replaceChildren(...(v === "auto"
+      ? [h("option", { value: "auto" }, t("lang.other"))]
+      : [h("option", { value: "en", selected: v === "km" }, t("lang.en")),
+        h("option", { value: "km", selected: v === "en" }, t("lang.km"))]));
+    to.disabled = v === "auto";
+  }
+  function syncFrom() { from.value = to.value === "en" ? "km" : "en"; syncTo(); }
+  syncTo();
+
   const layout = h("input", { type: "checkbox", disabled: !layoutAvailable,
     checked: layoutAvailable && !!info?.defaults?.layout });
-  const submit = h("button", { class: "pill pill-primary", type: "submit" }, t("opt.submit"));
+  const submit = h("button", { class: "pill pill-primary pill-lg", type: "submit" }, t("opt.submit"));
   const error = h("p", { class: "error-text", role: "alert" });
   const errorRow = h("div", { class: "upload-error", hidden: true }, error);
 
   const form = h("form", { class: "panel upload", onsubmit: (e) => { e.preventDefault(); send(); } },
     drop,
     h("div", { class: "upload-bar" },
-      h("label", { class: "inline-field" }, h("span", {}, t("opt.direction")), direction),
-      h("label", { class: "check", title: layoutAvailable ? t("opt.layoutDesc") : t("opt.layoutMissing") },
-        layout, h("span", {}, t("opt.layout")), h("span", { class: "hint", "aria-hidden": "true" }, "?")),
+      h("div", { class: "langs" }, from, swap, to),
       h("span", { class: "spacer" }),
       submit),
+    h("details", { class: "advanced" },
+      h("summary", {}, t("opt.advanced")),
+      h("label", { class: "check" }, layout, h("span", {}, t("opt.layout"))),
+      h("p", { class: "meta muted" }, layoutAvailable ? t("opt.layoutDesc") : t("opt.layoutMissing"))),
     errorRow);
 
   function choose(f) {
     if (!f) return;
     file = f;
-    dropTitle.replaceChildren(h("span", { class: "drop-file" }, f.name || "pasted-image.png"));
-    dropMeta.textContent = t("drop.change");
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = f.type?.startsWith("image/") && !/tiff/.test(f.type) ? URL.createObjectURL(f) : null;
+    dropBody.replaceChildren(
+      h("div", { class: "drop-preview" }, previewUrl
+        ? h("img", { src: previewUrl, alt: "" })
+        : h("span", { class: "drop-icon" }, icon("file"))),
+      h("p", { class: "drop-file" }, f.name || "pasted-image.png"),
+      h("p", { class: "meta" }, `${(f.size / 1048576).toFixed(1)} MB · ${t("drop.change")}`));
+    drop.classList.add("chosen");
     showError("");
   }
 
@@ -87,7 +125,7 @@ export function renderHome(root, info) {
     submit.textContent = t("opt.sending");
     const body = new FormData();
     body.append("file", file, file.name || "pasted-image.png");
-    body.append("direction", direction.value);
+    body.append("direction", directionOf(from.value));
     body.append("layout", layout.checked ? "true" : "false");
     try {
       const { job } = await api.upload(body);
@@ -137,19 +175,12 @@ export function renderHome(root, info) {
       list.replaceChildren(h("p", { class: "empty" }, t("recent.empty")));
       return;
     }
-    list.replaceChildren(h("table", { class: "index" },
-      h("thead", {}, h("tr", {},
-        h("th", { scope: "col" }, t("col.name")),
-        h("th", { scope: "col", class: "hide-sm" }, t("col.pages")),
-        h("th", { scope: "col" }, t("col.status")),
-        h("th", { scope: "col", class: "hide-sm" }, t("col.created")),
-        h("th", { scope: "col", class: "act" }, h("span", { class: "sr-only" }, t("col.actions"))))),
-      h("tbody", {}, jobs.map(row))));
+    list.replaceChildren(h("ul", { class: "cards" }, jobs.map(card)));
   }
 
-  function row(job) {
-    const open = () => { location.hash = `#/job/${job.id}`; };
+  function card(job) {
     const del = iconButton("trash", t("recent.delete"), async (e) => {
+      e.preventDefault();
       e.stopPropagation();
       // Two clicks: the first arms the button, the second deletes.
       if (!del.classList.contains("armed")) {
@@ -170,22 +201,36 @@ export function renderHome(root, info) {
       mine.remove(job.id);
       clearTimeout(pollTimer);
       refresh();
-    });
-    return h("tr", { onclick: open, tabindex: "0", onkeydown: (e) => { if (e.key === "Enter") open(); } },
-      h("td", { class: "name" }, h("a", { href: `#/job/${job.id}`, onclick: (e) => e.stopPropagation() }, job.filename)),
-      h("td", { class: "num-cell hide-sm" }, num(job.pages)),
-      h("td", {}, h("span", { class: `status status-${job.status}` }, statusLabel(job))),
-      h("td", { class: "meta hide-sm" }, formatDate(job.created)),
-      h("td", { class: "act" }, del, h("span", { class: "arrow", "aria-hidden": "true" }, " →")));
+    }, { class: "icon-btn card-del" });
+    // The first page render, once OCR has made it.
+    const thumb = h("div", { class: "card-thumb" }, h("span", { class: "drop-icon" }, icon("file")));
+    if (job.ocr_done || job.status === "done") {
+      const img = h("img", { src: api.assetUrl(job.id, "page-0"), alt: "", loading: "lazy",
+        onload: () => thumb.classList.add("has-img"), onerror: () => img.remove() });
+      thumb.append(img);
+    }
+    return h("li", {}, h("a", { class: "card", href: `#/job/${job.id}` },
+      thumb,
+      h("div", { class: "card-body" },
+        h("p", { class: "card-name", title: job.filename }, job.filename),
+        h("p", { class: "meta muted2" },
+          `${t(job.pages === 1 ? "doc.onePage" : "doc.pages", { n: num(job.pages) })} · ${formatDate(job.created)}`),
+        h("div", { class: "card-foot" },
+          h("span", { class: `status status-${job.status}` }, statusLabel(job)), del))));
   }
 
   // ── mount ───────────────────────────────────────────────────────────
+  showEmpty();
   const ttl = limits.job_ttl_hours;
   root.replaceChildren(h("section", { class: "wrap page" },
-    h("div", { class: "page-head" },
-      h("div", {}, h("h1", { class: "h2" }, t("home.title")), h("p", { class: "lede" }, t("home.lede")))),
+    h("div", { class: "hero" },
+      h("h1", { class: "h1" }, t("home.title")),
+      h("p", { class: "lede muted" }, t("home.lede"))),
     form,
     demo ? h("p", { class: "notice", html: t("home.demo", { h: ttl, pages: limits.max_pages, mb: limits.max_upload_mb }) }) : null,
+    h("ol", { class: "how" },
+      ["how.1", "how.2", "how.3"].map((k, i) => h("li", {},
+        h("span", { class: "how-n" }, String(i + 1)), h("span", {}, t(k))))),
     h("div", { class: "list-head" },
       h("h2", { class: "h3" }, t("recent.title")),
       h("p", { class: "meta muted2" }, t(demo ? "recent.noteDemo" : "recent.note", { h: ttl }))),
@@ -195,6 +240,7 @@ export function renderHome(root, info) {
   return () => {
     disposed = true;
     clearTimeout(pollTimer);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
     window.removeEventListener("dragover", onDragOver);
     window.removeEventListener("dragleave", onDragLeave);
     window.removeEventListener("drop", onDrop);
