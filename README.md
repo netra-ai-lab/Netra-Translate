@@ -154,7 +154,3 @@ curl -o letter.docx "http://localhost:8000/v1/jobs/<id>/export?format=docx"
 ## 6. Licensing
 
 This project is MIT, and so are Netra-OCR and Netra-NMT. However, Netra-OCR's YOLO and layout extras pull in `ultralytics` and `doclayout-yolo`, which are **AGPL-3.0**. The Docker image contains both, so it is labelled `MIT AND AGPL-3.0-only`. Check the upstream [`THIRD_PARTY_LICENSES.md`](https://github.com/netra-ai-lab/Netra-OCR/blob/master/THIRD_PARTY_LICENSES.md) before redistributing, or before running a modified public service. Part of the OCR recognizer's training data is licensed for non-commercial use only, so don't treat the app as cleared for commercial use. The bundled Kantumruy Pro font is under the SIL Open Font License (`src/netra_translate/server/static/fonts/OFL.txt`).
-
-## 7. Netra Lab
-
-Netra (នេត្រ) is Khmer for *eye*. [Netra Lab](https://github.com/netra-ai-lab) is an independent, non-commercial research lab working to make Khmer a first-class language for AI. It publishes the code, data and weights for everything it builds. There is no paid tier and no API key.
