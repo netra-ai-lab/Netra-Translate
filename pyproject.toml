@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netra-translate"
+version = "1.0.0"
+description = "Netra Translate: translate Khmer and English scans and PDFs (Netra OCR + Netra MT)"
+readme = "README.md"
+# netra-ocr itself needs 3.10+ (PEP 604 annotations).
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Netra Lab" }]
+dependencies = [
+    "netra-ocr[yolo,docx,pdf]>=1.1.0",
+    # PyPI's netra-nmt 0.1.0 is an older architecture than the published weights
+    # (loads with 85 missing / 49 unexpected keys -> garbage output). Use GitHub, pinned
+    # to a tested commit so image builds are reproducible.
+    "netra-nmt @ git+https://github.com/netra-ai-lab/Netra-NMT.git@dac829cb4bf76faab2ecce56134e9daa62fd18ac",
+    "khmercut",
+    # Config files (--config / NetraTranslate.from_config); ultralytics already needs it.
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart"]
+layout = ["netra-ocr[layout,pdf]>=1.1.0"]
+# The REST client (netra_translate.client), for talking to a running server.
+client = ["httpx>=0.24"]
+all = ["netra-translate[server,layout,client]"]
+dev = ["pytest", "httpx"]
+
+[project.urls]
+Source = "https://github.com/netra-ai-lab/netra-translate"
+
+[project.scripts]
+netra-translate = "netra_translate.cli:main"
+# Deprecated names from the netra-ocr-mt previews; removed in the next release.
+ocr-translate = "netra_translate.cli:legacy_translate"
+ocr-translate-web = "netra_translate.cli:legacy_serve"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+netra_translate = ["py.typed", "server/static/*", "server/static/brand/*", "server/static/js/*",
+                   "server/static/fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

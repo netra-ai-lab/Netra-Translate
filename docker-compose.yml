@@ -1,0 +1,20 @@
+# docker compose up --build   ->  http://localhost:8000
+services:
+  netra-translate:
+    image: ghcr.io/netra-ai-lab/netra-translate:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports: ["8000:8000"]
+    environment:
+      NETRA_MAX_UPLOAD_MB: "50"
+      NETRA_MAX_PAGES: "100"
+      NETRA_JOB_TTL_HOURS: "24"   # documents are deleted this long after their last change
+      # NETRA_LAYOUT: "1"         # layout analysis on by default (headings, tables, reading order)
+      # NETRA_API_KEY: "change-me" # require X-API-Key on /v1/*; set it before exposing the port
+    volumes:
+      - netra-data:/data          # keeps Recent documents across restarts
+    restart: unless-stopped
+
+volumes:
+  netra-data:

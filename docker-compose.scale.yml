@@ -1,0 +1,32 @@
+# Several workers behind one API, all on the netra-data volume:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.scale.yml up --build --scale worker=3
+#
+# The API process loads no models; each worker loads its own copy, so memory
+# grows with every worker. Uploads queue on the shared volume and the next free
+# worker takes them. Set NETRA_THREADS so that workers x threads <= CPU cores.
+# GET /ready answers 200 once at least one worker has loaded its models.
+services:
+  netra-translate:
+    command: ["netra-translate", "serve", "--no-worker"]
+
+  worker:
+    image: ghcr.io/netra-ai-lab/netra-translate:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["netra-translate", "worker"]
+    environment:
+      NETRA_THREADS: "2"
+      NETRA_MAX_PAGES: "100"
+      # NETRA_LAYOUT: "1"       # must match the API's setting
+    volumes:
+      - netra-data:/data
+    healthcheck:
+      # No HTTP port here: healthy while this worker's heartbeat is fresh.
+      test: ["CMD", "python", "-c", "import glob,json,os,time,socket; h=socket.gethostname(); assert any(json.load(open(p)).get('host')==h and time.time()-os.path.getmtime(p)<30 for p in glob.glob('/data/_workers/*.json'))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+    restart: unless-stopped
+    stop_grace_period: 2m       # SIGTERM: the worker finishes its current job, then exits

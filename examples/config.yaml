@@ -1,0 +1,25 @@
+# netra-translate translate -i scan.jpg --config examples/config.yaml
+# netra-translate serve --config examples/config.yaml      (and `worker`)
+# NetraTranslate.from_config("examples/config.yaml")
+#
+# Command-line flags override this file; the server falls back to NETRA_*
+# environment variables for anything not set here.
+
+pipeline:
+  direction: auto        # auto | km2en | en2km
+  layout: false          # layout analysis (needs the layout extra)
+  detector: yolo         # yolo | tesseract | legacy
+  device: null           # null = auto (CUDA if available), or cpu / cuda
+  mode: greedy           # greedy | beam
+  beam_size: 5
+  ocr_beam: 1
+  merge_lines: true      # merge OCR lines into paragraphs before translating
+
+server:
+  data_dir: ./netra-jobs
+  max_upload_mb: 50
+  max_pages: 100
+  job_ttl_hours: 24
+  layout: false          # default for requests that don't say
+  warmup: true
+  threads: 0             # torch CPU threads per worker; 0 = all cores

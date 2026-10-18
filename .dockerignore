@@ -1,0 +1,12 @@
+# Only pyproject/README/LICENSE, src/ and the docker build scripts are needed.
+# Everything else (the venv, caches, debug output) would bloat the build context.
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
+!docker/fetch_weights.py
+!docker/smoke_test.py
+**/__pycache__
+**/*.pyc
+**/*.egg-info

@@ -1,0 +1,29 @@
+# Unit tests on every push and pull request. They use fake models, so no weights
+# are downloaded; CPU torch keeps the install small.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.14.*" "torchvision==0.29.*"
+          pip install -e ".[server,dev]"
+
+      - run: pytest -q
